@@ -89,6 +89,19 @@ fn pin_from_ocr_inner(window: &WebviewWindow) -> Result<(), String> {
     create_pin_window(window.app_handle(), bytes, url, anchor)
 }
 
+/// 统一截图工具的「钉图」动作：把裁剪图创建为钉图窗口。
+/// 与 pin_from_ocr 共用建窗逻辑；anchor = 选区左上角的屏幕逻辑坐标。
+pub fn pin_from_image_file(
+    app: &AppHandle,
+    path: PathBuf,
+    anchor: (f64, f64),
+) -> Result<(), String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取截图失败: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let url = format!("data:image/png;base64,{b64}");
+    create_pin_window(app, bytes, url, anchor)
+}
+
 fn create_pin_window(
     app: &AppHandle,
     bytes: Vec<u8>,

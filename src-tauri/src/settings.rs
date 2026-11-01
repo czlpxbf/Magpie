@@ -295,15 +295,13 @@ pub struct Settings {
     pub show_dock_icon: bool,
     /// 登录时自动启动（LaunchAgent；UI 开关经 set_launch_at_login 同步 OS 状态）
     pub launch_at_login: bool,
-    /// 识图取字全局快捷键（如 "Alt+O"、"CmdOrCtrl+Shift+O"）；空串 = 禁用
+    /// 统一截图全局快捷键（框选后由动作条选复制/提取文字/翻译/钉图）；空串 = 禁用
     pub ocr_shortcut: String,
-    /// 识图翻译全局快捷键（截图→识别→默认翻译服务）；空串 = 禁用
+    /// 旧版识图翻译/解释/总结快捷键：字段保留以兼容旧配置文件，不再注册
     #[serde(default = "default_ocr_translate_shortcut")]
     pub ocr_translate_shortcut: String,
-    /// 识图解释全局快捷键（截图→识别→AI 解释）；空串 = 禁用
     #[serde(default = "default_ocr_explain_shortcut")]
     pub ocr_explain_shortcut: String,
-    /// 识图总结全局快捷键（截图→识别→AI 总结）；空串 = 禁用
     #[serde(default = "default_ocr_summarize_shortcut")]
     pub ocr_summarize_shortcut: String,
     /// 访达选图取字全局快捷键（选图片文件→识别）；空串 = 禁用

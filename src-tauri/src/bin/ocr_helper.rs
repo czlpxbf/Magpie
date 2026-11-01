@@ -17,7 +17,7 @@
 mod macos {
     use std::ffi::CStr;
     use std::os::raw::{c_char, c_void};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::exit;
 
     use objc2::{msg_send, AnyThread};
@@ -76,7 +76,9 @@ mod macos {
     ///    注意显式列表是硬约束：列表外语种（如日文）会被排除，自动检测则无此限制，
     ///    多语种混排场景优先用自动检测。
     /// 3. usesLanguageCorrection 只在 Accurate 下生效，Fast 下静默无效。
-    pub fn ocr_image_file(path: &Path) -> Result<String, String> {
+    /// 一次 Vision 请求同时取回文本行与归一化行矩形（top-left 原点）：
+    /// 截图吸附用的文字块不另跑一次识别，与 OCR 共用同一份观察结果。
+    fn run_request(path: &Path) -> Result<(Vec<String>, Vec<(f64, f64, f64, f64)>), String> {
         use objc2_vision::VNRequestTextRecognitionLevel;
 
         unsafe {
@@ -109,6 +111,7 @@ mod macos {
                     .ok_or_else(|| "OCR 无结果".to_string())?;
 
                 let mut lines: Vec<String> = Vec::new();
+                let mut rects: Vec<(f64, f64, f64, f64)> = Vec::new();
                 for obs in observations.iter() {
                     let candidates = obs.topCandidates(1);
                     for cand in candidates.iter() {
@@ -117,21 +120,87 @@ mod macos {
                             lines.push(line);
                         }
                     }
+                    // Vision 的 boundingBox 是左下角原点、0-1 归一化；
+                    // 转成 top-left 原点，前端可直接与框选坐标对齐
+                    let bb = obs.boundingBox();
+                    rects.push((
+                        bb.origin.x,
+                        1.0 - bb.origin.y - bb.size.height,
+                        bb.size.width,
+                        bb.size.height,
+                    ));
                 }
-                if lines.is_empty() {
-                    return Err("未识别到文字".into());
-                }
-                Ok(lines.join("\n"))
+                Ok((lines, rects))
             }));
 
             objc_autoreleasePoolPop(pool);
 
             match result {
-                Ok(Ok(text)) => Ok(text),
+                Ok(Ok(v)) => Ok(v),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err("OCR 过程异常".into()),
             }
         }
+    }
+
+    /// 识别前图像增强（2026-11-01）：小图放大 3x（Lanczos）。
+    /// Windows 侧 prepare_png_bytes 已有同一策略（实测 3x 可消除形近字误识）；
+    /// macOS Vision 对小字号同样吃力，这里补上对位处理。大图（整屏文件）不放大。
+    fn enhanced_copy(path: &Path) -> (PathBuf, Option<PathBuf>) {
+        use image::imageops::FilterType;
+
+        let Ok(img) = image::open(path) else {
+            return (path.to_path_buf(), None);
+        };
+        let max = 4096u32;
+        let scale = if img.width() * 3 <= max && img.height() * 3 <= max {
+            3u32
+        } else if img.width() * 2 <= max && img.height() * 2 <= max {
+            2u32
+        } else {
+            1u32
+        };
+        if scale == 1 {
+            return (path.to_path_buf(), None);
+        }
+        // 轻微锐化（sigma 1.0 / 阈值 2）：只提边缘，不引入明显光晕
+        let resized = img
+            .resize_exact(img.width() * scale, img.height() * scale, FilterType::Lanczos3)
+            .unsharpen(1.0, 2);
+        let out = std::env::temp_dir().join(format!(
+            "magpie-ocr-enh-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        if resized
+            .save_with_format(&out, image::ImageFormat::Png)
+            .is_err()
+        {
+            return (path.to_path_buf(), None);
+        }
+        (out.clone(), Some(out))
+    }
+
+    pub fn ocr_image_file(path: &Path) -> Result<String, String> {
+        let (target, temp) = enhanced_copy(path);
+        let result = run_request(&target);
+        if let Some(t) = temp {
+            let _ = std::fs::remove_file(t);
+        }
+        let (lines, _) = result?;
+        if lines.is_empty() {
+            return Err("未识别到文字".into());
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// 只取文字行矩形（截图吸附用；不做图像增强，归一化坐标与原图一致）
+    pub fn text_blocks(path: &Path) -> Result<Vec<(f64, f64, f64, f64)>, String> {
+        let (_, rects) = run_request(path)?;
+        Ok(rects)
     }
 
     /// macOS 专属入口逻辑：--capture 模式调系统 screencapture 框选。
@@ -227,8 +296,10 @@ mod windows_impl {
         } else {
             1u32
         };
+        // 放大后轻微锐化（sigma 1.0 / 阈值 2）：只提边缘，不引入明显光晕
         let img = if scale > 1 {
             img.resize_exact(img.width() * scale, img.height() * scale, FilterType::Lanczos3)
+                .unsharpen(1.0, 2)
         } else {
             img
         };
@@ -338,6 +409,70 @@ mod windows_impl {
         }
     }
 
+    /// 只截屏（统一截图工具冻结整屏用；识别由后续动作按需触发）
+    pub fn capture_only(spec: &str, out: &Path) -> Result<(), String> {
+        set_dpi_aware();
+        let parts: Vec<i32> = spec
+            .split(',')
+            .map(|s| s.trim().parse::<i32>().map_err(|e| format!("坐标参数错误: {e}")))
+            .collect::<Result<_, _>>()?;
+        if parts.len() != 4 {
+            return Err("坐标参数格式应为 x,y,w,h".into());
+        }
+        capture_region_to_png(parts[0], parts[1], parts[2], parts[3], out)
+    }
+
+    /// 文字行矩形（归一化 top-left 原点；截图吸附用）
+    pub fn text_blocks(path: &Path) -> Result<Vec<(f64, f64, f64, f64)>, String> {
+        let engine = pick_engine()?;
+        let png = prepare_png_bytes(path)?;
+        let bitmap = png_bytes_to_bitmap(&png).map_err(|e| format!("图片导入失败: {e}"))?;
+        let bw = bitmap.PixelWidth().unwrap_or(0) as f64;
+        let bh = bitmap.PixelHeight().unwrap_or(0) as f64;
+        if bw <= 0.0 || bh <= 0.0 {
+            return Err("图片尺寸无效".into());
+        }
+        let result = engine
+            .RecognizeAsync(&bitmap)
+            .map_err(|e| format!("OCR 识别失败: {e}"))?
+            .join()
+            .map_err(|e| format!("OCR 识别失败: {e}"))?;
+        let lines = result.Lines().map_err(|e| format!("OCR 结果解析失败: {e}"))?;
+        let mut out = Vec::new();
+        for i in 0..lines.Size().unwrap_or(0) {
+            let Ok(line) = lines.GetAt(i) else { continue };
+            // WinRT 的 OcrLine 不带矩形，逐词的 BoundingRect 求并集
+            let Ok(words) = line.Words() else { continue };
+            let (mut l, mut t) = (f32::MAX, f32::MAX);
+            let (mut r, mut b) = (f32::MIN, f32::MIN);
+            for j in 0..words.Size().unwrap_or(0) {
+                let Ok(word) = words.GetAt(j) else { continue };
+                let Ok(wr) = word.BoundingRect() else { continue };
+                if wr.Width <= 0.0 || wr.Height <= 0.0 {
+                    continue;
+                }
+                l = l.min(wr.X);
+                t = t.min(wr.Y);
+                r = r.max(wr.X + wr.Width);
+                b = b.max(wr.Y + wr.Height);
+            }
+            if l == f32::MAX || r <= l || b <= t {
+                continue;
+            }
+            let (w, h): (f64, f64) = ((r - l) as f64, (b - t) as f64);
+            if w < 4.0 || h < 4.0 {
+                continue;
+            }
+            out.push((
+                (l as f64 / bw).max(0.0),
+                (t as f64 / bh).max(0.0),
+                (w / bw).min(1.0),
+                (h / bh).min(1.0),
+            ));
+        }
+        Ok(out)
+    }
+
     /// 一体模式：截屏 + OCR（主应用遮罩窗完成选区后调用）
     pub fn snap_ocr(spec: &str, out: &Path) -> Result<String, String> {
         set_dpi_aware();
@@ -398,7 +533,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = || {
         eprintln!("usage: ocr_helper --capture <image-output-path>   (仅 macOS：框选+OCR)");
+        eprintln!("       ocr_helper --snap x,y,w,h <out.png>        (仅 Windows：只截屏)");
         eprintln!("       ocr_helper --snap-ocr x,y,w,h <out.png>    (仅 Windows：截屏+OCR)");
+        eprintln!("       ocr_helper --blocks <image-path>           (文字行矩形，吸附用)");
         eprintln!("       ocr_helper <image-path>                    (直接 OCR 指定图片)");
     };
     if args.len() < 2 {
@@ -410,6 +547,29 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         macos::install_uncaught_handler();
+        // --blocks <image>：只输出文字行矩形（归一化 top-left），供截图吸附
+        if mode == "--blocks" {
+            let Some(image) = args.get(2) else {
+                usage();
+                std::process::exit(2);
+            };
+            if !std::path::Path::new(image).exists() {
+                eprintln!("ERR:文件不存在");
+                std::process::exit(1);
+            }
+            match macos::text_blocks(std::path::Path::new(image)) {
+                Ok(rects) => {
+                    for (x, y, w, h) in rects {
+                        println!("{x:.5},{y:.5},{w:.5},{h:.5}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("ERR:{e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
         // --capture <out>：（仅 macOS）系统 screencapture 框选后识别
         let (capture, image) = if mode == "--capture" {
             (true, args.get(2).cloned().unwrap_or_default())
@@ -444,6 +604,43 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
+        if mode == "--blocks" {
+            let Some(image) = args.get(2) else {
+                usage();
+                std::process::exit(2);
+            };
+            if !std::path::Path::new(image).exists() {
+                eprintln!("ERR:文件不存在");
+                std::process::exit(1);
+            }
+            match windows_impl::text_blocks(std::path::Path::new(image)) {
+                Ok(rects) => {
+                    for (x, y, w, h) in rects {
+                        println!("{x:.5},{y:.5},{w:.5},{h:.5}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("ERR:{e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        if mode == "--snap" {
+            let Some(spec) = args.get(2) else {
+                usage();
+                std::process::exit(2);
+            };
+            let Some(out) = args.get(3) else {
+                usage();
+                std::process::exit(2);
+            };
+            if let Err(e) = windows_impl::capture_only(spec, std::path::Path::new(out)) {
+                eprintln!("ERR:{e}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         if mode == "--snap-ocr" {
             let Some(spec) = args.get(2) else {
                 usage();

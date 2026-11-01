@@ -1,0 +1,173 @@
+/* 统一截图遮罩：冻结整屏图铺底，选区外压暗，动作条浮在选区旁。
+   颜色与浮层语言一致（品牌蓝 #4f8cff / 深色哑光条）。 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+
+.snap-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+.snap-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* 未框选前整屏淡暗；框选后由选区的巨大 box-shadow 接管洞外压暗 */
+.snap-dim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.36);
+}
+
+.snap-sel {
+  position: absolute;
+  border: 1px solid #4f8cff;
+  box-shadow: 0 0 0 100000px rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+}
+
+.snap-handle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #fff;
+  border: 1px solid #4f8cff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  z-index: 3;
+}
+
+.snap-size {
+  position: absolute;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: rgba(28, 28, 32, 0.82);
+  color: #fff;
+  font-size: 11px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+.snap-hint {
+  position: absolute;
+  top: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: rgba(28, 28, 32, 0.78);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.snap-bar {
+  position: absolute;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 10px;
+  background: rgba(32, 32, 38, 0.94);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 6;
+}
+
+.snap-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.snap-btn:hover:not(:disabled) {
+  background: #4f8cff;
+  color: #fff;
+}
+
+.snap-btn:active:not(:disabled) {
+  background: #3f78e0;
+}
+
+.snap-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.snap-btn.close {
+  flex: 0 0 32px;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.snap-btn.close:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.snap-sep {
+  flex: 0 0 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.snap-error {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 70%;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(180, 48, 48, 0.94);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  z-index: 8;
+}

@@ -6,12 +6,7 @@ import type { PageProps } from "./types";
 export default function ShortcutsPage({ settings, patch, save, saved }: PageProps) {
 
 const SHORTCUT_ITEMS: Array<{
-  key:
-    | "ocrShortcut"
-    | "ocrTranslateShortcut"
-    | "ocrExplainShortcut"
-    | "ocrSummarizeShortcut"
-    | "fileOcrShortcut";
+  key: "ocrShortcut" | "fileOcrShortcut";
   label: string;
   desc: string;
   /** 出厂默认键位：重置按钮的目标值 */
@@ -19,33 +14,15 @@ const SHORTCUT_ITEMS: Array<{
 }> = [
   {
     key: "ocrShortcut",
-    label: "识图取字",
+    label: "截图",
     default: "Alt+S",
-    desc: "框选屏幕任意区域识别文字，可复制、钉住原图或继续翻译。",
-  },
-  {
-    key: "ocrTranslateShortcut",
-    label: "识图翻译",
-    default: "Alt+T",
-    desc: "框选截图，自动翻译识别出的文字。",
-  },
-  {
-    key: "ocrExplainShortcut",
-    label: "识图解释",
-    default: "Alt+E",
-    desc: "框选截图，AI 解释识别出的内容。",
-  },
-  {
-    key: "ocrSummarizeShortcut",
-    label: "识图总结",
-    default: "Alt+D",
-    desc: "框选截图，AI 提炼识别内容要点。",
+    desc: "框选屏幕区域后，可直接复制图片、提取文字、翻译或钉在屏幕上。",
   },
   {
     key: "fileOcrShortcut",
     label: "访达选图取字",
     default: "Alt+F",
-    desc: "识别所选图片文件的文字，后续与识图取字一致。",
+    desc: "识别所选图片文件的文字，后续与截图提取文字一致。",
   },
 ];
 

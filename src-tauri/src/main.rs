@@ -10,6 +10,7 @@ mod ocr;
 mod pageurl;
 mod pin;
 mod settings;
+mod snap;
 mod toast;
 mod translate;
 mod update;
@@ -87,10 +88,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             format!("{base}  {display}")
         }
     };
-    let ocr_item = MenuItem::with_id(app, "ocr", &label("识图取字", &s.ocr_shortcut), true, None::<&str>)?;
-    let tr_item = MenuItem::with_id(app, "ocr_translate", &label("识图翻译", &s.ocr_translate_shortcut), true, None::<&str>)?;
-    let ex_item = MenuItem::with_id(app, "ocr_explain", &label("识图解释", &s.ocr_explain_shortcut), true, None::<&str>)?;
-    let su_item = MenuItem::with_id(app, "ocr_summarize", &label("识图总结", &s.ocr_summarize_shortcut), true, None::<&str>)?;
+    let ocr_item = MenuItem::with_id(app, "ocr", &label("截图", &s.ocr_shortcut), true, None::<&str>)?;
     let file_ocr_item = MenuItem::with_id(app, "file_ocr", &label("访达选图取字", &s.file_ocr_shortcut), true, None::<&str>)?;
     let home_item = MenuItem::with_id(app, "home", "主页面", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "功能设置", true, None::<&str>)?;
@@ -101,9 +99,6 @@ fn build_tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     Menu::with_items(app, &[
         &ocr_item,
-        &tr_item,
-        &ex_item,
-        &su_item,
         &file_ocr_item,
         &sep1,
         &home_item,
@@ -115,132 +110,23 @@ fn build_tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     ])
 }
 
-/// 识图类快捷键槽位表：(settings 字段, 触发后的流程)。
-/// Panel = 截图→只弹结果面板；Auto(id) = 截图→识别→面板自动执行该动作
-/// （service 传 None，由前端按各动作既有的默认服务逻辑选择）；
-/// FilePick = 选图片文件→识别→结果面板（无截图步骤，访达选图取字）
+/// 截图类快捷键槽位表：(settings 字段, 触发后的流程)。
+/// Capture = 统一截图工具（框选后由动作条选 复制图片/提取文字/翻译/钉图）；
+/// FilePick = 选图片文件→识别→结果面板（访达选图取字，无截图步骤）。
+/// 2026-11-01：识图翻译/解释/总结三个独立快捷键并入统一截图，旧配置字段
+/// 仍保留在 settings（读取兼容），但不再注册。
 #[derive(Clone, Copy)]
 pub enum OcrSlot {
-    Panel,
-    Auto(&'static str),
+    Capture,
     FilePick,
 }
-const OCR_SHORTCUT_SLOTS: [(&str, OcrSlot); 5] = [
-    ("ocr_shortcut", OcrSlot::Panel),
-    ("ocr_translate_shortcut", OcrSlot::Auto("translate")),
-    ("ocr_explain_shortcut", OcrSlot::Auto("explain")),
-    ("ocr_summarize_shortcut", OcrSlot::Auto("summarize")),
+const OCR_SHORTCUT_SLOTS: [(&str, OcrSlot); 2] = [
+    ("ocr_shortcut", OcrSlot::Capture),
     ("file_ocr_shortcut", OcrSlot::FilePick),
 ];
 
 /// 各槽位当前注册的全局快捷键（流程见 OcrSlot）；handler 据此比对触发
 pub struct OcrShortcuts(pub std::sync::Mutex<Vec<(Shortcut, OcrSlot)>>);
-
-/// 识图取字流程（托盘菜单与全局快捷键共用）：
-/// 后台线程执行框选+识别，完成后推给 OCR 独立窗口（原图供「钉图」）。
-/// action 不为空时随 pending 携带自动执行的动作（识图翻译/解释/总结）
-fn start_ocr_flow(app: tauri::AppHandle, action: Option<&'static str>) {
-    eprintln!(
-        "[magpie:ocr] 识图取字开始{}",
-        action.map_or(String::new(), |a| format!("（自动执行 {a}）"))
-    );
-    // 翻译动作：此处按设置解析默认翻译服务（default 不在启用列表则顺延到首个启用项），
-    // 显式随 pending 传递——结果窗口设置可能尚未加载完，不能依赖前端自行解析默认值
-    //（与划词导流由浮动条侧解析 service 同理）。无启用服务传空串，前端提示「未启用翻译服务」。
-    let service = action.filter(|a| *a == "translate").map(|_| {
-        let s = settings::current(&app);
-        let d = s.translate.default;
-        if s.translate.enabled.iter().any(|e| e == &d) {
-            d
-        } else {
-            s.translate.enabled.first().cloned().unwrap_or_default()
-        }
-    });
-    // Windows：无系统级框选命令，流程由遮罩窗事件驱动（选区回调续跑识别）
-    #[cfg(target_os = "windows")]
-    ocr::start_region_capture_windows(&app, action, service);
-    #[cfg(not(target_os = "windows"))]
-    tauri::async_runtime::spawn(async move {
-        let image = match tauri::async_runtime::spawn_blocking(ocr::capture_region_to_file).await
-        {
-            Ok(Ok(image)) => image,
-            Ok(Err(e)) => {
-                eprintln!("[magpie:ocr] 失败：{e}");
-                // 取消是正常交互，不弹提示；其余失败走全局 toast 窗口
-                //（主窗口隐藏时也能看到）
-                if e != "截图已取消" {
-                    toast::show_toast(&app, &e, "err");
-                }
-                return;
-            }
-            Err(e) => {
-                eprintln!("[magpie:ocr] 任务失败: {e}");
-                return;
-            }
-        };
-        // 识别完成后一次性呈现（识别级别 Fast，通常亚秒级）：
-        // 面板出现即有结果，失败则只有 toast——没有「弹出又消失」的闪烁。
-        // 「正在识别…」无条件立即常驻（不设延时阈值），填补串行化的感知空窗；
-        // 成功 → 撤场让位面板，失败 → 原位换装为错误两段话术
-        eprintln!("[magpie:ocr] 截图完成，开始识别");
-        toast::show_toast_sticky(&app, "正在识别…", "progress");
-        let img = image.clone(); // 识别在闭包内消费，image 留给失败清理与钉图
-        match tauri::async_runtime::spawn_blocking(move || ocr::recognize_file(&img)).await {
-            Ok(Ok(text)) => {
-                eprintln!("[magpie:ocr] 成功：len={}", text.len());
-                toast::hide_toast(&app);
-                ocr::push_ocr_result(
-                    &app,
-                    text,
-                    image,
-                    action.map(|a| (a.to_string(), Some(service.clone().unwrap_or_default()))),
-                );
-            }
-            Ok(Err(e)) => {
-                eprintln!("[magpie:ocr] 失败：{e}");
-                // 「未识别到文字」先走自愈重截（快速手势可能截到遮罩淡出/页面
-                // 动画未稳的过渡帧，整图发虚被判空——见 retry_region_capture 注释）：
-                // 按事件钩子记录的拖选矩形延迟静默重截再识别，成功即正常展示
-                if e == "未识别到文字" {
-                    if let Some((text, retry_image)) = ocr::retry_region_capture() {
-                        toast::hide_toast(&app);
-                        ocr::push_ocr_result(
-                            &app,
-                            text,
-                            retry_image,
-                            action.map(|a| (a.to_string(), Some(service.clone().unwrap_or_default()))),
-                        );
-                        let _ = std::fs::remove_file(&image); // 原糊图已无价值
-                        return;
-                    }
-                }
-                // 自愈未成（或非空识别错误）：证据落用户日志（stderr 仅 dev 可见）：
-                // 尺寸 + 路径。「未识别到文字」时**保留**截图供事后复核（删文件 =
-                // 删证据）；其余失败照常清理
-                let dims = image::image_dimensions(&image)
-                    .map(|(w, h)| format!("{w}x{h}"))
-                    .unwrap_or_else(|_| "?".into());
-                user_log(&format!(
-                    "[ocr] 识别失败：{e}；截图 {dims} {}",
-                    image.display()
-                ));
-                if e != "未识别到文字" {
-                    let _ = std::fs::remove_file(&image);
-                }
-                if e != "截图已取消" {
-                    // 统一话术：主行说发生了什么，次行说该怎么办（toast 两段式）
-                    let msg = if e == "未识别到文字" {
-                        "未检测到文字\n重新框选，确认区域内有清晰的文字".to_string()
-                    } else {
-                        e.clone()
-                    };
-                    toast::show_toast(&app, &msg, "err");
-                }
-            }
-            Err(e) => eprintln!("[magpie:ocr] 任务失败: {e}"),
-        }
-    });
-}
 
 /// 访达选图取字：文件选择 → 识别 → OCR 独立窗口。结果链路（toast 话术、
 /// 原图生命周期、动作面板）与识图取字全同，仅输入从截图换成图片文件。
@@ -251,6 +137,10 @@ fn start_ocr_flow(app: tauri::AppHandle, action: Option<&'static str>) {
 /// 所选图片拷贝进临时目录再走统一生命周期（钉图引用副本，替换/清理逻辑见
 /// floating::replace_ocr_image），原文件不动。
 fn start_file_ocr_flow(app: tauri::AppHandle) {
+    // 截图遮罩期间不叠加文件选择面板（遮罩置顶会盖住系统对话框）
+    if app.get_webview_window("snap").is_some() {
+        return;
+    }
     // 线程模型（sample 实证的死锁，勿改回主线程直调）：
     // global-shortcut 插件在调用 with_handler 期间持有自身快捷键表锁（其 lib.rs
     // 的 MutexGuard 横跨整个 if let），而 run_on_main_thread 在主线程调用时是
@@ -338,10 +228,7 @@ pub fn apply_ocr_shortcuts(app: &tauri::AppHandle) {
     for (field, slot) in OCR_SHORTCUT_SLOTS {
         let text = match field {
             "ocr_shortcut" => s.ocr_shortcut.clone(),
-            "ocr_translate_shortcut" => s.ocr_translate_shortcut.clone(),
-            "ocr_explain_shortcut" => s.ocr_explain_shortcut.clone(),
-            "file_ocr_shortcut" => s.file_ocr_shortcut.clone(),
-            _ => s.ocr_summarize_shortcut.clone(),
+            _ => s.file_ocr_shortcut.clone(),
         }
         .trim()
         .to_string();
@@ -528,8 +415,7 @@ fn main() {
                         if let Some(slot) = hit {
                             match slot {
                                 OcrSlot::FilePick => start_file_ocr_flow(app.clone()),
-                                OcrSlot::Panel => start_ocr_flow(app.clone(), None),
-                                OcrSlot::Auto(a) => start_ocr_flow(app.clone(), Some(a)),
+                                OcrSlot::Capture => snap::start_capture_tool(app),
                             }
                         }
                     }
@@ -699,7 +585,7 @@ fn main() {
             capture::start(&handle, tx, debounce_ms);
             capture::spawn_worker(handle.clone(), rx);
 
-            // 状态栏常驻图标：左键进主页面；右键菜单含「识图取字」当前快捷键提示
+            // 状态栏常驻图标：左键进主页面；右键菜单含「截图」当前快捷键提示
             let menu = build_tray_menu(&handle)?;
             TrayIconBuilder::with_id("main")
                 // 状态栏专用模板图（单色鹊形 + alpha，白斑/眼为镂空）：
@@ -718,10 +604,7 @@ fn main() {
                         show_main_window(app);
                         let _ = app.emit_to("main", "nav://page", "model");
                     }
-                    "ocr" => start_ocr_flow(app.clone(), None),
-                    "ocr_translate" => start_ocr_flow(app.clone(), Some("translate")),
-                    "ocr_explain" => start_ocr_flow(app.clone(), Some("explain")),
-                    "ocr_summarize" => start_ocr_flow(app.clone(), Some("summarize")),
+                    "ocr" => snap::start_capture_tool(app),
                     "file_ocr" => start_file_ocr_flow(app.clone()),
                     "github" => {
                         let _ = open_url("https://github.com/demo007x/Magpie".into());
@@ -821,8 +704,10 @@ fn main() {
             floating::pops::pop_ready,
             floating::pops::floating_pick,
             floating::ocr::move_ocr,
-            ocr::ocr_region_selected,
-            ocr::ocr_region_cancel,
+            snap::snap_session,
+            snap::snap_text_rects,
+            snap::snap_action,
+            snap::snap_cancel,
             pin::pin_get_data,
             pin::pin_window_ready,
             toast::notify,

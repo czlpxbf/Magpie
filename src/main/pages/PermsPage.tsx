@@ -105,8 +105,8 @@ export default function PermsPage() {
                   <div className="row-title">屏幕录制</div>
                   <div className="row-sub">
                     {screenAccess === false
-                      ? "识图取字必需，授权后即可框选屏幕文字识别。"
-                      : "识图取字的前提，识别全程在本机完成，画面不上传。"}
+                      ? "截图与提取文字必需，授权后即可框选屏幕。"
+                      : "截图与提取文字的前提，识别全程在本机完成，画面不上传。"}
                   </div>
                 </div>
                 <span className={`pill ${screenAccess ? "ok" : screenAccess === false ? "bad" : ""}`}>

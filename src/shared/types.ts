@@ -121,13 +121,11 @@ export interface Settings {
   showDockIcon: boolean;
   /** 登录时自动启动（LaunchAgent；开关即时生效，Rust 落盘） */
   launchAtLogin: boolean;
-  /** 识图取字全局快捷键（如 "Alt+O"、"CmdOrCtrl+Shift+O"；空串 = 禁用） */
+  /** 统一截图全局快捷键（如 "Alt+O"、"CmdOrCtrl+Shift+O"；空串 = 禁用） */
   ocrShortcut: string;
-  /** 识图翻译全局快捷键（截图→识别→默认翻译服务；空串 = 禁用） */
+  /** 旧版识图翻译/解释/总结快捷键：字段保留以兼容旧配置文件往返，不再注册 */
   ocrTranslateShortcut: string;
-  /** 识图解释全局快捷键（截图→识别→AI 解释；空串 = 禁用） */
   ocrExplainShortcut: string;
-  /** 识图总结全局快捷键（截图→识别→AI 总结；空串 = 禁用） */
   ocrSummarizeShortcut: string;
   /** 访达选图取字全局快捷键（选图片文件→识别；空串 = 禁用） */
   fileOcrShortcut: string;

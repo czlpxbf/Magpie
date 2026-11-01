@@ -39,11 +39,13 @@ Rust 侧 `src-tauri/src/`：
 
 - `capture/` 划词捕获（最高风险模块）：`#[cfg]` 分发 macos/other 后端，两后端同一 `start(tx, debounce_ms)` 签名；Windows 实现进 `capture/windows.rs` 时照此接入，勿在 worker 层加平台分支。
 - `floating/` 条窗与结果窗管理（目录模块：bar = 条窗定位/尺寸/显隐/拖拽/hover 合成，ocr = 结果窗/pending 交接/钉住，pops = Windows 分离卡，chrome = 圆角阴影防闪，mod = 共享几何助手）、`toast.rs` 全局提示、`pin.rs` 钉图窗口（复用 floating.html，按 label 前缀 `pin-` 进入钉图渲染模式）。
-- `ocr.rs` + `src/bin/ocr_helper.rs`：框选截图 + Vision 识别**全部隔离在子进程**——AppKit/Vision 的 ObjC 异常或崩溃只杀子进程，主应用不 abort。
+- `snap.rs` 统一截图工具：快捷键 → 冻结整屏图 → 自绘遮罩（可微调/吸附窗口与文字行）→ 选区动作条（复制图片/提取文字/翻译/钉图）。截图与遮罩 UI 全归这里，别再走系统 `screencapture -i`（那套交互不归应用，加不了动作条）。
+- `ocr.rs` + `src/bin/ocr_helper.rs`：只负责识别（macOS Vision / Windows.Media.Ocr），**全部隔离在子进程**——AppKit/Vision 的 ObjC 异常或崩溃只杀子进程，主应用不 abort。
 - `entities/` 实体出口命令（`detect_dates` = NSDataDetector 日期 / `detect_places` = NLTagger 地名 NER / `open_in_calendar` = .ics 日历预填；目录模块 dates / places / calendar，`#[tauri::command]` 包装器集中在 mod.rs——generate_handler 按此路径解析宏项，子模块 re-export 不可靠）：新 FFI 遵循 capture/macos/ffi.rs 的手写 msgSend 范式。
 - `settings.rs` JSON 配置 + 黑名单、`ai.rs` OpenAI 协议 SSE 哑管道（无 AI 逻辑）、`app_picker.rs` 系统应用选择、`update.rs` GitHub Releases 更新检测、`main.rs` setup/命令注册/事件分发/托盘。
 
 数据流：CGEventTap(鼠标) → detect 线程(防抖/AX 查询) → `capture::spawn_worker` 过滤(自身PID/黑名单/重复) → emit `selection://captured` → TS `show_floating_bar` → 用户点动作 → TS `aiChat`(Channel 流式) → Rust `ai_chat` 转发 SSE。
+截图数据流：快捷键 → `snap.rs` 冻结整屏（macOS `screencapture -R` / Windows helper BitBlt）→ 建 `snap` 遮罩窗 → TS 框选/吸附 → `snap_action` 裁剪冻结图并分发（剪贴板 / OCR 结果窗 / 翻译 / 钉图）。
 
 关键非显性设计（改代码前先懂）：
 
