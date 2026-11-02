@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 use crate::capture::CaptureMuteGuard;
 
@@ -76,16 +75,14 @@ static SNAP_MUTE: Mutex<Option<CaptureMuteGuard>> = Mutex::new(None);
 /// 会话代号：后台文字矩形任务完成时据此丢弃过期结果（上一会话的活不能
 /// 写进下一会话的吸附数据）
 static SNAP_GEN: AtomicU64 = AtomicU64::new(0);
-/// 启动闸门：框选遮罩尚在「后台截图 → 主线程建窗」途中时，连按快捷键
-/// 会并发出两套会话（后一套覆盖前一套、窗口 label 冲突），必须忽略第二次
-static SNAP_STARTING: AtomicBool = AtomicBool::new(false);
+/// 会话闸门：从按下快捷键到遮罩关闭/动作完成，全程只允许一套截图会话；
+/// 连按不会并发截图，也不会出现两个全屏遮罩
+static SNAP_BUSY: AtomicBool = AtomicBool::new(false);
 /// 前端是否已把遮罩内容准备好（收到 snap_ready 才真正显示窗口）。
 /// 遮罩是全屏置顶层：页面没加载时也绝不显示，从根上避免「透明窗口吞点击」
 static SNAP_READY: AtomicBool = AtomicBool::new(false);
 /// 最近一次前端鼠标事件时间（UNIX 毫秒）：用于识别「窗口可见但输入完全死掉」
 static SNAP_TOUCH_MS: AtomicU64 = AtomicU64::new(0);
-/// 遮罩存续期间临时注册的全局 Esc（前端失焦时唯一可靠的退出通道）
-static SNAP_ESC: AtomicBool = AtomicBool::new(false);
 
 /// 统一截图入口（全局快捷键 / 托盘菜单共用）。
 /// 窗口创建必须在主线程；快捷键 handler 虽在事件线程，也统一经
@@ -97,13 +94,13 @@ pub fn start_capture_tool(app: &AppHandle) {
             // 连按快捷键：旧遮罩尚未完成异步销毁，重复建同 label 窗口会 panic
             return;
         }
-        if SNAP_STARTING.swap(true, Ordering::Relaxed) {
+        if SNAP_BUSY.swap(true, Ordering::Relaxed) {
             return;
         }
         let mon = match cursor_monitor(&app2) {
             Ok(m) => m,
             Err(e) => {
-                SNAP_STARTING.store(false, Ordering::Relaxed);
+                SNAP_BUSY.store(false, Ordering::Relaxed);
                 crate::toast::show_toast(&app2, &e, "err");
                 return;
             }
@@ -116,7 +113,6 @@ pub fn start_capture_tool(app: &AppHandle) {
                 let app4 = app3.clone();
                 if app3
                     .run_on_main_thread(move || {
-                        SNAP_STARTING.store(false, Ordering::Relaxed);
                         if let Err(e) = show_overlay(&app4) {
                             crate::user_log(&format!("[snap] 启动失败：{e}"));
                             crate::toast::show_toast(&app4, &e, "err");
@@ -124,12 +120,12 @@ pub fn start_capture_tool(app: &AppHandle) {
                     })
                     .is_err()
                 {
-                    SNAP_STARTING.store(false, Ordering::Relaxed);
+                    SNAP_BUSY.store(false, Ordering::Relaxed);
                     clear_session();
                 }
             }
             Err(e) => {
-                SNAP_STARTING.store(false, Ordering::Relaxed);
+                SNAP_BUSY.store(false, Ordering::Relaxed);
                 crate::user_log(&format!("[snap] 启动失败：{e}"));
                 crate::toast::show_toast(&app3, &e, "err");
             }
@@ -237,10 +233,8 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     };
     crate::user_log("[snap] 遮罩窗已创建（隐藏，等待前端就绪）");
     let app_watch = app.clone();
-    let app_event = app.clone();
-    win.on_window_event(move |event| {
+    win.on_window_event(|event| {
         if matches!(event, WindowEvent::Destroyed) {
-            unregister_escape(&app_event);
             clear_session();
         }
     });
@@ -291,9 +285,8 @@ fn abort_overlay(app: &AppHandle, generation: u64, msg: &str) {
         if SNAP_GEN.load(Ordering::Relaxed) != generation {
             return;
         }
-        unregister_escape(&app2);
         if let Some(w) = app2.get_webview_window("snap") {
-            let _ = w.close();
+            let _ = w.hide();
         }
         clear_session();
         if !msg.is_empty() {
@@ -335,7 +328,7 @@ fn activate_app() {
 }
 
 fn clear_session() {
-    SNAP_STARTING.store(false, Ordering::Relaxed);
+    SNAP_BUSY.store(false, Ordering::Relaxed);
     let session = SESSION.lock().unwrap().take();
     release_ui_state();
     if let Some(s) = session {
@@ -343,44 +336,20 @@ fn clear_session() {
     }
 }
 
-/// 遮罩存续期间的全局 Esc：窗口没拿到键盘焦点时，前端 keydown 收不到，
-/// 这是用户唯一的退路。注册失败只记日志，看门狗仍会兜底。
-fn register_escape(app: &AppHandle) {
-    if SNAP_ESC.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    let Ok(shortcut) = "Escape".parse::<Shortcut>() else {
-        return;
-    };
-    match app.global_shortcut().register(shortcut) {
-        Ok(_) => crate::user_log("[snap] 已注册全局 Esc 退出"),
-        Err(e) => {
-            crate::user_log(&format!("[snap] 全局 Esc 注册失败：{e}"));
-            SNAP_ESC.store(false, Ordering::Relaxed);
-        }
-    }
-}
-
-fn unregister_escape(app: &AppHandle) {
-    if !SNAP_ESC.swap(false, Ordering::Relaxed) {
-        return;
-    }
-    if let Ok(shortcut) = "Escape".parse::<Shortcut>() {
-        let _ = app.global_shortcut().unregister(shortcut);
-    }
-}
-
-pub fn is_active(app: &AppHandle) -> bool {
-    app.get_webview_window("snap").is_some()
-}
-
-/// 全局 Esc 命中：关闭遮罩并释放静音/临时快捷键
-pub fn cancel_from_shortcut(app: &AppHandle) {
-    unregister_escape(app);
-    if let Some(w) = app.get_webview_window("snap") {
-        let _ = w.close();
-    }
-    clear_session();
+/// 收尾时先隐藏窗口、释放状态，再排到主线程稍后销毁。
+/// 不在取消命令里同步 close：避免「销毁正在执行 IPC 的 webview」这类重入问题；
+/// 即使销毁环节异常，屏幕也已经先恢复可用。
+fn destroy_overlay_soon(app: &AppHandle) {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        let app3 = app2.clone();
+        let _ = app2.run_on_main_thread(move || {
+            if let Some(w) = app3.get_webview_window("snap") {
+                let _ = w.close();
+            }
+        });
+    });
 }
 
 /// 释放与遮罩窗绑定的运行时状态（不含冻结图：动作线程还要用它裁剪）
@@ -763,13 +732,12 @@ pub fn snap_text_rects() -> Vec<SnapRect> {
 /// 前端已渲染好冻结图：此时才显示遮罩并夺取焦点/键盘。
 /// 命令本身在主线程执行，窗口调用安全；macOS 需要先激活进程再让窗口成为 key。
 #[tauri::command]
-pub fn snap_ready(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+pub fn snap_ready(window: WebviewWindow) -> Result<(), String> {
     if window.label() != "snap" {
         return Err("非截图窗口".into());
     }
     SNAP_READY.store(true, Ordering::Relaxed);
     SNAP_TOUCH_MS.store(now_ms(), Ordering::Relaxed);
-    register_escape(&app);
     #[cfg(target_os = "macos")]
     {
         configure_overlay_window(&window);
@@ -798,7 +766,12 @@ fn now_ms() -> u64 {
 
 #[tauri::command]
 pub fn snap_cancel(app: AppHandle) {
-    cancel_from_shortcut(&app);
+    crate::user_log("[snap] 取消截图");
+    if let Some(w) = app.get_webview_window("snap") {
+        let _ = w.hide();
+    }
+    clear_session();
+    destroy_overlay_soon(&app);
 }
 
 /// 选区动作：裁剪冻结图 → 关闭遮罩 → 后台执行。
@@ -821,10 +794,11 @@ pub fn snap_action(
     // 先把遮罩收起来，再把解码/裁剪/识别全部丢到后台线程：5K 截图解码
     // 若留在 IPC 主线程，按钮会「按下没反应」零点几秒
     release_ui_state();
-    unregister_escape(&app);
+    SNAP_BUSY.store(false, Ordering::Relaxed);
     if let Some(win) = app.get_webview_window("snap") {
-        let _ = win.close();
+        let _ = win.hide();
     }
+    destroy_overlay_soon(&app);
 
     let Session {
         image,
