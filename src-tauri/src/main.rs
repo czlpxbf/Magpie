@@ -404,6 +404,13 @@ fn main() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     if event.state == ShortcutState::Pressed {
+                        // 截图遮罩期间的临时全局 Esc（前端没拿到焦点时的退出通道）
+                        if let Ok(esc) = "Escape".parse::<Shortcut>() {
+                            if *shortcut == esc && snap::is_active(app) {
+                                snap::cancel_from_shortcut(app);
+                                return;
+                            }
+                        }
                         let hit = app
                             .state::<OcrShortcuts>()
                             .0
@@ -706,6 +713,8 @@ fn main() {
             floating::ocr::move_ocr,
             snap::snap_session,
             snap::snap_text_rects,
+            snap::snap_ready,
+            snap::snap_touch,
             snap::snap_action,
             snap::snap_cancel,
             pin::pin_get_data,

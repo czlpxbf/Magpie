@@ -26,6 +26,81 @@ body {
   cursor: crosshair;
 }
 
+/* 加载/失败态：即使遮罩已显示，也必须是可见、可关闭的一屏，
+   不能出现「透明全屏窗吞点击」 */
+.snap-blocking {
+  background: rgba(0, 0, 0, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+
+.snap-loading {
+  min-width: 260px;
+  max-width: 70vw;
+  padding: 22px 26px 18px;
+  border-radius: 12px;
+  background: rgba(32, 32, 38, 0.96);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  color: #fff;
+  text-align: center;
+}
+
+.snap-loading-title {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.snap-loading-sub {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.72);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.snap-loading-btn {
+  margin-top: 16px;
+  height: 32px;
+  padding: 0 20px;
+  border: none;
+  border-radius: 7px;
+  background: #4f8cff;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.snap-loading-btn:hover {
+  background: #3f78e0;
+}
+
+/* 常驻右上角关闭钮：不知道 Esc 的用户也能用鼠标退出 */
+.snap-corner-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: rgba(28, 28, 32, 0.78);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  z-index: 7;
+}
+
+.snap-corner-close:hover {
+  background: #4f8cff;
+  color: #fff;
+}
+
 .snap-image {
   position: absolute;
   inset: 0;

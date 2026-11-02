@@ -131,11 +131,33 @@ function Overlay() {
   const [texts, setTexts] = useState<Rect[]>([]);
   const [busy, setBusy] = useState<ActionId | null>(null);
   const [error, setError] = useState("");
+  const [imageError, setImageError] = useState(false);
 
   const selectionRef = useRef<Rect | null>(null);
   const busyRef = useRef<ActionId | null>(null);
+  const readyRef = useRef(false);
+  const touchRef = useRef(0);
   selectionRef.current = selection;
   busyRef.current = busy;
+
+  // 只有前端真正画好内容后才让 Rust 显示全屏遮罩；遮罩一旦可见就会吃掉
+  // 所有鼠标事件，绝不能在空白/未加载状态下出现
+  const markReady = useCallback(() => {
+    if (readyRef.current) return;
+    readyRef.current = true;
+    invoke("snap_ready").catch(() => {
+      // 连就绪命令都失败：立即请求关闭（看门狗还有一层兜底）
+      invoke("snap_cancel").catch(() => undefined);
+    });
+  }, []);
+
+  // 鼠标活动心跳：Rust 看门狗用它判断遮罩输入链路是否真的可用
+  const touch = useCallback(() => {
+    const now = Date.now();
+    if (now - touchRef.current < 300) return;
+    touchRef.current = now;
+    invoke("snap_touch").catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -148,14 +170,20 @@ function Overlay() {
       .catch((e) => {
         if (!alive) return;
         setError(String(e));
-        window.setTimeout(() => {
-          invoke("snap_cancel").catch(() => undefined);
-        }, 1200);
+        setImageError(true);
+        markReady();
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [markReady]);
+
+  // 图片加载兜底：即使 onLoad 没触发，也不能让窗口一直保持隐藏
+  useEffect(() => {
+    if (!session) return;
+    const t = window.setTimeout(markReady, 1500);
+    return () => window.clearTimeout(t);
+  }, [session, markReady]);
 
   // 文字行矩形由 Rust 后台跑 OCR 计算；就绪前吸附只用窗口/屏幕边缘
   useEffect(() => {
@@ -237,6 +265,7 @@ function Overlay() {
   };
 
   const onMouseDown = (e: ReactMouseEvent) => {
+    touch();
     if (e.button !== 0 || !session) return;
     const p = { x: e.clientX, y: e.clientY };
     if (selection && inside(p, selection)) {
@@ -247,6 +276,7 @@ function Overlay() {
   };
 
   const onMouseMove = (e: ReactMouseEvent) => {
+    touch();
     if (!drag || !session) return;
     const x = e.clientX;
     const y = e.clientY;
@@ -301,6 +331,7 @@ function Overlay() {
   };
 
   const onMouseUp = (e?: ReactMouseEvent) => {
+    touch();
     if (!drag) return;
     if (drag.mode === "new") {
       // 用松手时的真实坐标收尾（最后一次 mousemove 未必落在松手点）
@@ -316,8 +347,20 @@ function Overlay() {
     setDrag(null);
   };
 
-  if (!session) {
-    return <div className="snap-root" />;
+  if (!session || imageError) {
+    return (
+      <div className="snap-root snap-blocking">
+        <div className="snap-loading">
+          <div className="snap-loading-title">
+            {imageError ? "截图预览加载失败" : error ? "截图启动失败" : "正在准备截图…"}
+          </div>
+          {error && <div className="snap-loading-sub">{error}</div>}
+          <button className="snap-loading-btn" onClick={cancel}>
+            关闭
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const live: Rect | null =
@@ -369,7 +412,18 @@ function Overlay() {
         cancel();
       }}
     >
-      <img className="snap-image" src={session.imageUrl} alt="" draggable={false} />
+      <img
+        className="snap-image"
+        src={session.imageUrl}
+        alt=""
+        draggable={false}
+        // 图没加载完之前绝不显示全屏窗；失败时转为可见的「关闭」页
+        onLoad={markReady}
+        onError={() => {
+          setImageError(true);
+          markReady();
+        }}
+      />
       {!live && <div className="snap-dim" />}
 
       {live && (
@@ -413,7 +467,16 @@ function Overlay() {
         </>
       )}
 
-      {!live && <div className="snap-hint">拖动框选 · Esc 取消</div>}
+      {!live && <div className="snap-hint">拖动框选 · Esc / 右键取消</div>}
+
+      <button
+        className="snap-corner-close"
+        aria-label="取消截图"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={cancel}
+      >
+        <X size={16} strokeWidth={1.75} />
+      </button>
 
       {live && !drag && (
         <div
